@@ -31,11 +31,18 @@ We recommend using **Python 3.8+** and **PyTorch ≥ 1.10**.
 
 ## 📦 Dataset Preparation
 
-Download the **motVidarReal2020** dataset and extract it.  
+You can download the **motVidarReal2025** dataset from the following Baidu Cloud link:
+
+> 📁 **motVidarReal2025.zip**  
+> 🔗 [https://pan.baidu.com/s/1JVDxX-adPDE3-mqSaoV-OQ?pwd=0601](https://pan.baidu.com/s/1JVDxX-adPDE3-mqSaoV-OQ?pwd=0601)  
+> 🔑 Extraction Code: `0601`  
+> *(Shared via Baidu Netdisk Super Member v4)*
+
+After downloading, extract the dataset and place it under your preferred directory.  
 The dataset should look like this:
 
 ```
-motVidarReal2020/
+motVidarReal2025/
 ├── badminton/
 │   └── spikes.dat
 ├── cpl1/
@@ -53,9 +60,9 @@ motVidarReal2020/
 └── config.yaml
 ```
 
-- Each folder represents a **scene** (e.g., `badminton`, `cars6`, `rotTrans`, etc.).
+- Each folder represents a **scene** (e.g., `spike59`, `rotTrans`, etc.).
 - `spikes.dat` — Spike stream data recorded by the spike camera.  
-- `spikes_gt.txt` or `.csv` — Ground truth annotations for object tracking.  
+- `spikes_gt.txt` — Ground truth annotations for object tracking.  
   - Scenes **without GT files** can only be evaluated qualitatively via visualization.  
   - Scenes **with GT files** support **quantitative evaluation** using tracking metrics.
 
