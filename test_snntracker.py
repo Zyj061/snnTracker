@@ -34,7 +34,7 @@ if __name__ == "__main__":
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--scene_idx", "-s", type=int, default=6)
+    parser.add_argument("--scene_idx", "-s", type=int, default=0)
     parser.add_argument("--attention_size", "-attn_size", type=int, default=15)
 
     parser.add_argument("--data_path", "-d", type=str, default="/root/autodl-fs/motVidarReal2020/")
