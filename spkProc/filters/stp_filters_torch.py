@@ -1,203 +1,170 @@
 # -*- coding: utf-8 -*- 
-# @Time : 2023/7/16 20:13 
+# @Time : 2021/11/19 16:25 
 # @Author : Yajing Zheng
-# @Email: yj.zheng@pku.edu.cn
-# @File : load_dat.py
-import os, sys
-import warnings
-import glob
-import yaml
+# @File : stp_filters_torch.py
+import copy
+
+import torch
 import numpy as np
-import path
 
-# key-value for generate data loader according to the type of label data
-LABEL_DATA_TYPE = {
-    'raw': 0,
-    'reconstruction': 1,
-    'optical_flow': 2,
-    'mono_depth_estimation': 3.1,
-    'stero_depth_estimation': 3.2,
-    'detection': 4,
-    'tracking': 5,
-    'recognition': 6
-}
+class STPFilter:
 
+    def __init__(self, spike_h, spike_w, device, diff_time=1, **STPargs):
+        self.spike_h = spike_h
+        self.spike_w = spike_w
+        self.device = device
 
-# generate parameters dictionary according to labeled or not
-def data_parameter_dict(data_filename, label_type):
-    filename = path.split_path_into_pieces(data_filename)
+        # specify stp parameters
+        if STPargs.get('u0', None) is None:
+            self.u0 = 0.1
+            self.D = 0.02
+            self.F = 1.7
+            self.f = 0.11
+            self.time_unit = 2000
 
-    if os.path.isabs(data_filename):
-        file_root = data_filename
-        if os.path.isdir(file_root):
-            search_root = file_root
         else:
-            search_root = '\\'.join(filename[0:-1])
-        config_filename = path.seek_file(search_root, 'config.yaml')
-    else:
-        file_root = os.path.join('', 'datasets', *filename)
-        config_filename = os.path.join('', 'datasets', filename[0], 'config.yaml')
+            self.u0 = STPargs.get('u0')
+            self.D = STPargs.get('D')
+            self.F = STPargs.get('F')
+            self.f = STPargs.get('f')
+            self.time_unit = STPargs.get('time_unit')
 
-    try:
-        with open(config_filename, 'r', encoding='utf-8') as fin:
-            configs = yaml.load(fin, Loader=yaml.FullLoader)
-    except TypeError as err:
-        print("Cannot find config file" + str(err))
-        raise err
+        self.r0 = 1
 
-    except KeyError as exception:
-        print('ERROR! Task name does not exist')
-        print('Task name must be in %s' % LABEL_DATA_TYPE.keys())
-        raise exception
+        self.diff_time = diff_time # duration of window for record past dynamics for calculating the differnece
+        self.R = torch.ones(self.spike_h, self.spike_w) * self.r0
+        self.u = torch.ones(self.spike_h, self.spike_w) * self.u0
+        self.r_old = torch.ones(self.diff_time, self.spike_h, self.spike_w) * self.r0
 
-    is_labeled = configs.get('is_labeled')
+        self.R = self.R.to(self.device)
+        self.u = self.u.to(self.device)
+        self.r_old = self.r_old.to(self.device)
 
-    paraDict = {'spike_h': configs.get('spike_h'), 'spike_w': configs.get('spike_w')}
-    paraDict['filelist'] = None
-
-    if is_labeled:
-        paraDict['labeled_data_type'] = configs.get('labeled_data_type')
-        paraDict['labeled_data_suffix'] = configs.get('labeled_data_suffix')
-        paraDict['label_root_list'] = None
-
-        if os.path.isdir(file_root):
-            filelist = sorted(glob.glob(file_root + '/*.dat'), key=os.path.getmtime)
-            filepath = filelist[0]
-
-            labelname = path.replace_identifier(filename, configs.get('data_field_identifier', ''),
-                                                configs.get('label_field_identifier', ''))
-            label_root_list = os.path.join('', 'datasets', *labelname)
-            paraDict['labeled_data_dir'] = sorted(glob.glob(label_root_list + '/*.' + paraDict['labeled_data_suffix']),
-                                                  key=os.path.getmtime)
-
-            paraDict['filelist'] = filelist
-            paraDict['label_root_list'] = label_root_list
+        # LIF detect layer parameters
+        self.detectVoltage = torch.zeros(self.spike_h, self.spike_w).to(self.device)
+        if STPargs.get('lifSize', None) is None:
+            lifSize = 3
+            paddingSize = 1
         else:
-            filepath = glob.glob(file_root)[0]
-            rawname = filename[-1].replace('.dat', '')
-            filename.pop(-1)
-            filename.append(rawname)
-            labelname = path.replace_identifier(filename, configs.get('data_field_identifier', ''),
-                                                configs.get('label_field_identifier', ''))
-            label_root = os.path.join('', 'datasets', *labelname)
-            paraDict['labeled_data_dir'] = glob.glob(label_root + '.' + paraDict['labeled_data_suffix'])[0]
-    else:
-        filepath = file_root
+            lifSize = STPargs.get('lifSize')
+            paddingSize = int((lifSize - 1) / 2)
 
-    paraDict['filepath'] = filepath
+        self.lifConv = torch.nn.Conv2d(in_channels=1, out_channels=1, kernel_size=(lifSize, lifSize),
+                                       padding=(paddingSize, paddingSize),
+                                       bias=False)
+        self.lifConv.weight.data = torch.ones(1, 1, lifSize, lifSize) * 3.0
 
-    return paraDict
-
-
-class SpikeStream:
-    def __init__(self, **kwargs):
-
-        self.SpikeMatrix = None
-        self.filename = kwargs.get('filepath')
-        if os.path.splitext(self.filename)[-1][1:] != 'dat':
-            self.filename = self.filename + '.dat'
-        self.spike_w = kwargs.get('spike_w')
-        self.spike_h = kwargs.get('spike_h')
-        if 'print_dat_detail' not in kwargs:
-            self.print_dat_detail = True
+        self.lifConv = self.lifConv.to(self.device)
+        if STPargs.get('filterThr', None) is None:
+            self.filterThr = 0.1  # filter threshold
+            self.voltageMin = -8
+            self.lifThr = 2
         else:
-            self.print_dat_detail = kwargs.get('print_dat_detail')
+            self.filterThr = STPargs.get('filterThr')
+            self.voltageMin = STPargs.get('voltageMin')
+            self.lifThr = STPargs.get('lifThr')
 
-    def get_spike_matrix(self, flipud=True, with_head=False):
+        self.filter_spk = torch.zeros(self.spike_h, self.spike_w).to(self.device)
+        self.lif_spk = torch.zeros(self.spike_h, self.spike_w).to(self.device)
+        self.spikePrevMnt = torch.zeros([self.spike_h, self.spike_w], device=self.device)
+        self.stp_gradient = 0
+        self.adjusted_threshold = torch.zeros(self.spike_h, self.spike_w).to(self.device)
 
-        file_reader = open(self.filename, 'rb')
-        video_seq = file_reader.read()
-        video_seq = np.frombuffer(video_seq, 'b')
+    def update_dynamics(self, curT, spikes):
 
-        video_seq = np.array(video_seq).astype(np.byte)
-        if self.print_dat_detail:
-            print(video_seq)
-        if with_head:
-            decode_width = 416
+        spikeCurMnt = self.spikePrevMnt.detach().clone()
+        spike_bool = spikes.bool()
+        spikeCurMnt[spike_bool] = curT + 1
+        dttimes = spikeCurMnt - self.spikePrevMnt
+        dttimes = dttimes / self.time_unit
+        exp_D = torch.exp((-dttimes[spike_bool] / self.D))
+        self.R[spike_bool] = 1 - (1 - self.R[spike_bool] * (1 - self.u[spike_bool])) * exp_D
+        exp_F = torch.exp((-dttimes[spike_bool] / self.F))
+        self.u[spike_bool] = self.u0 + (
+                self.u[spike_bool] + self.f * (1 - self.u[spike_bool]) - self.u0) * exp_F
+
+        tmp_diff = torch.abs(self.R - self.r_old[0])
+        # 根据梯度动态调整滤波器阈值
+        self.stp_gradient = (0.5 * self.stp_gradient + 0.5 * torch.div(tmp_diff, self.R))
+        gradient_sqrt = torch.from_numpy(np.sqrt(self.stp_gradient.cpu().numpy()) + 1).to(self.device)
+        self.adjusted_threshold = torch.div(self.filterThr, gradient_sqrt)
+
+        self.filter_spk[:] = 0
+        # self.filter_spk[spike_bool & (tmp_diff >= self.filterThr)] = 1
+        self.filter_spk[spike_bool & (tmp_diff >= self.adjusted_threshold)] = 1
+
+        if curT < self.diff_time:
+            self.r_old[curT] = self.R.detach().clone()
         else:
-            decode_width = self.spike_w
-        # img_size = self.spike_height * self.spike_width
-        img_size = self.spike_h * decode_width
-        img_num = len(video_seq) // (img_size // 8)
+            self.r_old[0:-1] = self.r_old[1:].detach().clone()
+            self.r_old[-1] = self.R.detach().clone()
+        self.spikePrevMnt = spikeCurMnt.detach().clone()
+        del spikeCurMnt, dttimes, exp_D, exp_F, tmp_diff
 
-        if self.print_dat_detail:
-            print('loading total spikes from dat file -- spatial resolution: %d x %d, total timestamp: %d' %
-                  (decode_width, self.spike_h, img_num))
+    def update_dynamic_offline(self, spikes, intervals):
 
-        # SpikeMatrix = np.zeros([img_num, self.spike_h, self.spike_width], np.byte)
+        isi_num = intervals.shape[0]
+        R = torch.ones(isi_num, self.spike_h, self.spike_w) * self.r0
+        u = torch.ones(isi_num, self.spike_h, self.spike_w) * self.u0
+        prev_isi = intervals[0, :, :]
 
-        pix_id = np.arange(0, img_num * self.spike_h * decode_width)
-        pix_id = np.reshape(pix_id, (img_num, self.spike_h, decode_width))
-        comparator = np.left_shift(1, np.mod(pix_id, 8))
-        byte_id = pix_id // 8
+        for t in range(1, isi_num):
+            tmp_isi = intervals[t, :, :]
+            update_idx = (tmp_isi != prev_isi) & (spikes[t, :, :] == 1) | (tmp_isi == 1)
+            tmp_isi = torch.from_numpy(tmp_isi).to(self.device).float()
 
-        data = video_seq[byte_id]
-        result = np.bitwise_and(data, comparator)
-        tmp_matrix = (result == comparator)
+            exp_D = torch.exp((-tmp_isi[update_idx] / self.D))
+            self.R[update_idx] = 1 - (1 - self.R[update_idx] * (1 - self.u[update_idx])) * exp_D
+            exp_F = torch.exp((-tmp_isi[update_idx] / self.F))
+            self.u[update_idx] = self.u0 + (
+                    self.u[update_idx] + self.f * (1 - self.u[update_idx]) - self.u0) * exp_F
 
-        # if with head, delete them
-        if with_head:
-            delete_indx = np.arange(400, 416)
-            tmp_matrix = np.delete(tmp_matrix, delete_indx, 2)
+            tmp_r = self.R.detach().clone()
+            tmp_u = self.u.detach().clone()
+            R[t, :, :] = copy.deepcopy(tmp_r)
+            u[t, :, :] = copy.deepcopy(tmp_u)
 
-        if flipud:
-            self.SpikeMatrix = tmp_matrix[:, ::-1, :]
-        else:
-            self.SpikeMatrix = tmp_matrix
+        return R, u
 
-        file_reader.close()
-        self.SpikeMatrix = self.SpikeMatrix.astype(np.byte)
-        return self.SpikeMatrix
+    def local_connect(self, spikes):
+        inputSpk = torch.reshape(spikes, (1, 1, self.spike_h, self.spike_w)).float()
+        # tmp_fired = spikes != 0
+        self.detectVoltage[spikes == False] -= 1
+        tmpRes = self.lifConv(inputSpk)
+        tmpRes = torch.squeeze(tmpRes).to(self.device)
+        self.detectVoltage += tmpRes.data
+        self.detectVoltage[self.detectVoltage < self.voltageMin] = self.voltageMin
 
-        # return spikes with specified length and begin index
+        self.lif_spk[:] = 0
+        self.lif_spk[self.detectVoltage >= self.lifThr] = 1
+        self.detectVoltage[self.detectVoltage >= self.lifThr] *= 0.8
+        # self.detectVoltage[(self.detectVoltage < self.lifThr) & (self.detectVoltage > 0)] = 0
 
-    def get_block_spikes(self, begin_idx, block_len=1, flipud=True, with_head=False):
+        del inputSpk, tmpRes
 
-        file_reader = open(self.filename, 'rb')
-        video_seq = file_reader.read()
-        video_seq = np.frombuffer(video_seq, 'b')
+    def local_connect_offline(self, spikes):
+        timestamps = spikes.shape[0]
+        tmp_voltage = []
+        lif_spk = []
 
-        video_seq = np.array(video_seq).astype(np.uint8)
+        for iSpk in range(timestamps):
+            tmp_spikes = spikes[iSpk]
+            tmp_spk = torch.from_numpy(spikes[iSpk]).to(self.device)
+            inputSpk = torch.reshape(tmp_spk, (1, 1, self.spike_h, self.spike_w)).float()
+            # tmp_fired = spikes != 0
+            self.detectVoltage[tmp_spikes == 0] -= 1
+            tmpRes = self.lifConv(inputSpk)
+            tmpRes = torch.squeeze(tmpRes).to(self.device)
+            self.detectVoltage += tmpRes.data
+            self.detectVoltage[self.detectVoltage < self.voltageMin] = self.voltageMin
 
-        if with_head:
-            decode_width = 416
-        else:
-            decode_width = self.spike_w
-        # img_size = self.spike_height * self.spike_width
-        img_size = self.spike_h * decode_width
-        img_num = len(video_seq) // (img_size // 8)
+            self.lif_spk[:] = 0
+            self.lif_spk[self.detectVoltage >= self.lifThr] = 1
+            # self.detectVoltage[(self.detectVoltage < self.lifThr) & (self.detectVoltage > 0)] = 0
+            self.detectVoltage[self.detectVoltage >= self.lifThr] *= 0.8
+            voltage = self.detectVoltage.cpu().detach().numpy()
+            tmp_voltage.append(copy.deepcopy(voltage))
+            lif_spk.append(self.lif_spk.cpu().detach().numpy())
 
-        end_idx = begin_idx + block_len
-        if end_idx > img_num:
-            warnings.warn("block_len exceeding upper limit! Zeros will be padded in the end. ", ResourceWarning)
-            end_idx = img_num
-
-        if self.print_dat_detail:
-            print(
-                'loading total spikes from dat file -- spatial resolution: %d x %d, begin index: %d total timestamp: %d' %
-                (decode_width, self.spike_h, begin_idx, block_len))
-
-        pix_id = np.arange(0, block_len * self.spike_h * decode_width)
-        pix_id = np.reshape(pix_id, (block_len, self.spike_h, decode_width))
-        comparator = np.left_shift(1, np.mod(pix_id, 8))
-        byte_id = pix_id // 8
-        id_start = begin_idx * img_size // 8
-        id_end = id_start + block_len * img_size // 8
-        data = video_seq[id_start:id_end]
-        data_frame = data[byte_id]
-        result = np.bitwise_and(data_frame, comparator)
-        tmp_matrix = (result == comparator)
-
-        # if with head, delete them
-        if with_head:
-            delete_indx = np.arange(400, 416)
-            tmp_matrix = np.delete(tmp_matrix, delete_indx, 2)
-
-        if flipud:
-            self.SpikeMatrix = tmp_matrix[:, ::-1, :]
-        else:
-            self.SpikeMatrix = tmp_matrix
-
-        file_reader.close()
-        self.SpikeMatrix = self.SpikeMatrix.astype(np.byte)
-        return self.SpikeMatrix
+        del inputSpk, tmpRes
+        return tmp_voltage, lif_spk
