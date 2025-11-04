@@ -15,7 +15,6 @@ sys.path.append("..")
 
 from spkProc.tracking.snn_tracker import SNNTracker
 from spkData.load_dat import data_parameter_dict, SpikeStream
-from tracking_mot import TrackingMetrics
 from utils import vis_trajectory
 from visualization.get_video import obtain_mot_video
 from visualization.get_video import obtain_detection_video
