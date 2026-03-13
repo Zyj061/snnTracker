@@ -110,13 +110,16 @@ It represents one of the first demonstrations of **bio-inspired online tracking 
 If you find this project helpful, please cite:
 
 ```bibtex
-@article{zheng2025snntracker,
-  title={SNNTracker: Online High-speed Multi-Object Tracking with Spike Camera},
+@ARTICLE{11165142,
   author={Zheng, Yajing and Li, Chengen and Zhang, Jiyuan and Yu, Zhaofei and Huang, Tiejun},
-  journal={IEEE Transactions on Pattern Analysis and Machine Intelligence},
-  year={2025},
-  publisher={IEEE}
-}
+  journal={IEEE Transactions on Pattern Analysis and Machine Intelligence}, 
+  title={SNNTracker: Online High-Speed Multi-Object Tracking With Spike Camera}, 
+  year={2026},
+  volume={48},
+  number={1},
+  pages={624-638},
+  keywords={Cameras;Tracking;Image reconstruction;Real-time systems;Target tracking;Low latency communication;Visualization;YOLO;Neuromorphics;Lighting;DNF;high-speed MOT;online learning;STDP;spike cameras;spiking neural network;WTA},
+doi={10.1109/TPAMI.2025.3610696}}
 ```
 
 ---
